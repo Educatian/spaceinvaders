@@ -1,0 +1,7 @@
+# Godot cache + threaded build (not deployed)
+.godot/
+build/
+# temp logs/helpers
+*.log
+_*.txt
+serve_web.py
