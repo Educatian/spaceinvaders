@@ -727,6 +727,9 @@ func _input(event: InputEvent) -> void:
 				# weapon-cycle keys Q / TAB).
 				physics_mode = not physics_mode
 				queue_redraw()
+			elif event.keycode == KEY_5:
+				# 5 = launch the standalone Orbital Gunner physics episode.
+				get_tree().change_scene_to_file("res://scenes/OrbitalGunner.tscn")
 		if event is InputEventMouseButton and event.pressed \
 				and event.button_index == MOUSE_BUTTON_LEFT:
 			var mpos = Vector2(event.position)

@@ -65,6 +65,25 @@ formative assessment / learning-analytics research.
 
 Target band: middle school (MS-PS2 / MS-ESS1), with extensions toward HS-PS2 / HS-PS3 / HS-ESS1.
 
+### 🎯 Orbital Gunner — trajectory-matching episode
+
+A standalone physics episode — press **5** on the ship-select screen. You set a cannon's
+**angle + power** and bend a single shot through planet gravity to hit targets, or thread it
+through a sequence of **gates** ("match the trajectory"). Only the first third of the arc is
+previewed, so you reason about projectile motion + gravity instead of tracing a line. Six
+stages ramp from a straight-shot tutorial to multi-planet slingshots; every shot is logged to
+`orbital_telemetry.jsonl`.
+
+<div align="center">
+<img src="docs/screenshots/orbital_gunner.png" alt="Orbital Gunner — slingshot a shot around a planet to the target" width="300">
+<img src="docs/screenshots/thread_gates.png" alt="Thread the Gates — bend one shot through every ring" width="300">
+<br><sub>Left: slingshot around the planet to the target. Right: thread one trajectory through all the gates.</sub>
+</div>
+
+Teaches **projectile motion + universal gravitation** (MS-PS2-4) and **parameter→curve
+mapping / functional thinking** (gates mode). Controls: drag from the cannon or arrow keys for
+angle/power, Space to fire, R retry, N next, Esc back.
+
 ## 🛠 Tech
 
 Single-file game logic in GDScript (`scripts/Game.gd`) with procedural + sprite rendering,
