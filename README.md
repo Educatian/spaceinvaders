@@ -45,14 +45,19 @@ shots by a real inverse-square law — to hit anything you have to reason about 
 mass, and distance**, not memorize facts. Every shot is logged as learning telemetry for
 formative assessment / learning-analytics research.
 
+<div align="center">
+<img src="docs/screenshots/physics_lab.png" alt="Physics Lab — gravity field overlay with shots curving past planets" width="380">
+<br><sub>Physics Lab: cyan vectors show the 1/r² gravity field; shots curve past the labeled planets.</sub>
+</div>
+
 | In-game mechanic | NGSS | Status |
 |---|---|---|
 | Shots curve near planets by `Σ G·m / r²` | **MS-PS2-4** (gravity ∝ mass) | ✅ live |
 | Predicted-trajectory overlay (key **T**) | SEP · Developing & using models | ✅ live |
+| Gravity-field visualization (1/r² vector grid, key **F**) | **MS-PS2-5** (forces at a distance) | ✅ live |
+| Mass labels + mass variety across planets | **MS-PS2-4** (force ∝ mass) | ✅ live |
 | Shot/hit telemetry → `telemetry.jsonl` (+ `analyze_telemetry.py`) | SEP · Analyzing data | ✅ live |
-| Gravity-field visualization (1/r² vector grid) | **MS-PS2-5** (forces at a distance) | 🔶 planned |
 | Orbit-insertion challenge, ideal `v = √(GM/r)` | **MS-ESS1-2** (orbital motion) | 🔶 planned |
-| Mass-comparison challenge | **MS-PS2-4** | 🔶 planned |
 | Firing recoil (action–reaction) | **MS-PS2-1** (Newton's 3rd law) | 🔶 planned |
 
 **Full design spec:** [`docs/EDUCATIONAL_DESIGN.md`](docs/EDUCATIONAL_DESIGN.md) ·

@@ -182,6 +182,28 @@ const BOSS_HP := 40
 const BOSS_SPEED := 42.0
 const BOSS_BULLET_SPEED := 200.0
 
+# --- Physics Lab (educational gravity mode) -------------------------------
+# Newtonian point-gravity on player projectiles. Acceleration on a bullet is
+# the vector sum over all wells of  a = GRAV_G * mass * (well.pos - b.pos) / r^2
+# (the (well.pos - b.pos) is normalized, leaving an inverse-SQUARE magnitude so
+# the pedagogy "gravity is proportional to mass / distance squared" is literal).
+# Constants are tuned so trajectories visibly CURVE at this 600x920 scale while
+# staying controllable. GRAV_MIN_R2 clamps r^2 near a well to avoid the 1/0
+# singularity (and a too-violent slingshot); a bullet entering GRAV_ABSORB *
+# radius is captured with a small spark.
+const GRAV_G := 1.0               # global gravitational constant (folded into masses)
+const GRAV_MIN_R2 := 900.0        # squared-distance floor (~30 px) bounding accel
+const GRAV_ABSORB := 0.62         # bullet absorbed inside this fraction of well radius
+const GRAV_SPAWN_MARGIN := 90.0   # keep wells this far from arena edges
+const GRAV_PLAYER_CLEAR := 150.0  # keep wells this far from the player start (center)
+# A shot is "gravity-assisted" if at any step it came within this multiple of a
+# well's radius (close enough that gravity meaningfully bent its path).
+const GRAV_ASSIST_NEAR := 2.4
+# Trajectory prediction: number of preview steps + the fixed timestep used
+# (matches a typical frame so the preview tracks real flight).
+const TRAJ_STEPS := 44
+const TRAJ_DT := 1.0 / 60.0
+
 # --- State ----------------------------------------------------------------
 var arena = Vector2(480, 720)
 var t = 0.0
@@ -383,6 +405,31 @@ var weapon_btn_r = 30.0
 # Class-select card hit-rects (computed in _layout_ui).
 var class_cards: Array = []   # Array of Rect2, one per class
 var diff_row_rect = Rect2()   # clickable difficulty selector row on SELECT
+var mode_row_rect = Rect2()   # clickable ARCADE/PHYSICS toggle row on SELECT
+
+# --- Physics Lab runtime --------------------------------------------------
+# physics_mode gates ALL gravity behavior. When false the game is byte-for-byte
+# the original arcade experience (no wells, no prediction, no telemetry).
+var physics_mode = false
+# Active gravitational bodies for the current wave. Each: {pos,mass,radius,color,name}.
+var gravity_wells: Array = []
+var opt_trajectory = true      # T toggles the predicted-path overlay (default ON)
+var opt_field: bool = false    # F toggles the gravity-field vector overlay (Physics Lab)
+
+# Dev-only: when true, _capture_shot() auto-enters Physics Lab and saves
+# annotated gameplay screenshots for the repo docs. Ships false; flip locally.
+const DEMO_CAPTURE := false
+var _demo_started = false
+
+# --- Learning telemetry ---------------------------------------------------
+# In-memory event log flushed to user://telemetry.jsonl. Only populated in
+# physics_mode. Kept entirely separate from scores.save.
+const TELEMETRY_PATH := "user://telemetry.jsonl"
+const TELEMETRY_FLUSH_EVERY := 25     # append to disk after this many new events
+var telemetry: Array = []             # buffered event dicts (JSON-serializable)
+var telemetry_flushed = 0             # count already written this run
+var tel_shots = 0                     # shots fired this run (physics mode)
+var tel_assist_hits = 0               # hits whose bullet was gravity-assisted
 
 
 func _ready() -> void:
@@ -525,6 +572,8 @@ func _layout_cards() -> void:
 	# Difficulty selector row sits just below the cards.
 	var rows_bottom = start_y + float(n) * (card_h + gap)
 	diff_row_rect = Rect2(Vector2(margin, rows_bottom), Vector2(card_w, 34.0))
+	# Mode toggle row (ARCADE / PHYSICS LAB) just below the difficulty row.
+	mode_row_rect = Rect2(Vector2(margin, rows_bottom + 34.0 + 8.0), Vector2(card_w, 32.0))
 
 
 func _make_stars() -> void:
@@ -638,6 +687,15 @@ func _reset() -> void:
 	run_time = 0.0
 	run_kills = 0
 	toasts.clear()
+	# --- Physics Lab + telemetry: fresh per run --------------------------
+	gravity_wells.clear()
+	telemetry.clear()
+	telemetry_flushed = 0
+	tel_shots = 0
+	tel_assist_hits = 0
+	if physics_mode:
+		_spawn_wells_for_wave()
+		_telemetry_session_start()
 	Engine.time_scale = 1.0
 	state = STATE_PLAY
 	sfx.play_music()
@@ -664,12 +722,22 @@ func _input(event: InputEvent) -> void:
 				_change_difficulty(-1)
 			elif event.keycode == KEY_RIGHT:
 				_change_difficulty(1)
+			elif event.keycode == KEY_G:
+				# G = toggle ARCADE <-> PHYSICS LAB (chosen to avoid the in-play
+				# weapon-cycle keys Q / TAB).
+				physics_mode = not physics_mode
+				queue_redraw()
 		if event is InputEventMouseButton and event.pressed \
 				and event.button_index == MOUSE_BUTTON_LEFT:
 			var mpos = Vector2(event.position)
 			# Clicking the difficulty row cycles forward.
 			if diff_row_rect.has_point(mpos):
 				_change_difficulty(1)
+				return
+			# Clicking the mode row toggles ARCADE / PHYSICS LAB.
+			if mode_row_rect.has_point(mpos):
+				physics_mode = not physics_mode
+				queue_redraw()
 				return
 			for i in class_cards.size():
 				var r: Rect2 = class_cards[i]
@@ -729,6 +797,14 @@ func _input(event: InputEvent) -> void:
 			return
 		if event.keycode == KEY_Q or event.keycode == KEY_TAB:
 			weapon = (weapon + 1) % WEAPONS.size()
+		if event.keycode == KEY_T and physics_mode:
+			# Toggle the predicted-trajectory overlay (Physics Lab only).
+			opt_trajectory = not opt_trajectory
+		if event.keycode == KEY_F and physics_mode:
+			# Toggle the gravity-field vector overlay (Physics Lab only). F is
+			# free in-play (T=trajectory, G=mode on select, Q/Tab=weapon, M=mute,
+			# O=options, P/Esc=pause, E=bomb).
+			opt_field = not opt_field
 		if event.keycode == KEY_SHIFT:
 			_try_dash()
 		if event.keycode == KEY_E:
@@ -848,6 +924,17 @@ func _process(delta: float) -> void:
 			# Bank this run's meta currency into the lifetime total + persist.
 			total_credits += run_credits
 			_save_credits()
+			# Persist any remaining telemetry (separate file from scores.save).
+			if physics_mode:
+				_telemetry_append({
+					"event": "session_end",
+					"t": run_time,
+					"wave": wave,
+					"score": score,
+					"shots": tel_shots,
+					"gravity_assist_hits": tel_assist_hits,
+				})
+				_telemetry_flush()
 			sfx.play("gameover")
 		# R = replay same class, C = choose class (handled in _input).
 		queue_redraw()
@@ -915,6 +1002,41 @@ func _capture_shot() -> void:
 	var img: Image = get_viewport().get_texture().get_image()
 	if img != null:
 		img.save_png("user://shot.png")
+	if DEMO_CAPTURE and not _demo_started:
+		_demo_started = true
+		_demo_phys()
+
+
+func _demo_phys() -> void:
+	# Dev-only: render Physics Lab gameplay and save annotated screenshots.
+	physics_mode = true
+	opt_field = true
+	_select_class(0)                       # starts a run; spawns gravity wells
+	await get_tree().create_timer(0.2).timeout
+	# Fire a fan of shots so their gravity-curved paths are visible at capture.
+	var k: int = 0
+	while k < 12:
+		var ang: float = -PI * 0.5 + float(k) * 0.16
+		_spawn_bullet(player_pos, ang, 1, 0)
+		k += 1
+	await get_tree().create_timer(0.55).timeout
+	await RenderingServer.frame_post_draw
+	await RenderingServer.frame_post_draw
+	var im1: Image = get_viewport().get_texture().get_image()
+	if im1 != null:
+		im1.save_png("user://phys_field.png")
+	# Second wave of shots for a fuller field shot.
+	k = 0
+	while k < 12:
+		var ang2: float = -PI * 0.5 - float(k) * 0.16
+		_spawn_bullet(player_pos, ang2, 1, 0)
+		k += 1
+	await get_tree().create_timer(0.5).timeout
+	await RenderingServer.frame_post_draw
+	await RenderingServer.frame_post_draw
+	var im2: Image = get_viewport().get_texture().get_image()
+	if im2 != null:
+		im2.save_png("user://phys_curves.png")
 
 
 func _decay_shake(delta: float) -> void:
@@ -1196,6 +1318,10 @@ func _fire() -> void:
 				var ms_a: float = spread + 0.20 + 0.16 * float(mi + 1)
 				_spawn_homing(nose, player_rot - ms_a, dmg, turn)
 				_spawn_homing(nose, player_rot + ms_a, dmg, turn)
+	# Telemetry: one shot event per fire action (Physics Lab only). Uses the
+	# ship nose + facing as the launch vector and the discrete-bullet speed.
+	if physics_mode:
+		_log_shot(nose, player_rot, BULLET_SPEED)
 
 
 func _fan_offsets(count: int, spacing: float) -> Array:
@@ -1219,6 +1345,12 @@ func _spawn_bullet(from: Vector2, ang: float, dmg: int = 1, pierce: int = 0) -> 
 		"life": BULLET_LIFE,
 		"dmg": dmg,
 		"pierce": pierce + up_pierce_bonus,
+		# Physics Lab bookkeeping (harmless/unused in arcade mode): p0/dir0 are
+		# the launch point + unit aim direction so a hit can measure how far the
+		# target sat off the original straight ray (proxy for a curved shot).
+		"p0": from,
+		"dir0": Vector2.RIGHT.rotated(ang),
+		"assisted": false,
 	})
 
 
@@ -1236,6 +1368,203 @@ func _spawn_homing(from: Vector2, ang: float, dmg: int, turn: float) -> void:
 	})
 
 
+# ============================  PHYSICS LAB  ===============================
+# Everything in this section is inert unless physics_mode is true: callers are
+# all gated, gravity_wells is empty in arcade mode, and telemetry only records
+# in physics_mode. So arcade play is unaffected.
+func _spawn_wells_for_wave() -> void:
+	# Place 1-3 gravitational bodies for the current wave. Positions are SEEDED
+	# by the wave number (deterministic, reproducible) via wave-based integer
+	# offsets, so no randomness is consumed at load and a given wave always looks
+	# the same. Wells avoid the arena edges and the player's central start.
+	gravity_wells.clear()
+	if not physics_mode:
+		return
+	var center: Vector2 = arena * 0.5
+	var count: int = clampi(1 + int(wave / 3), 1, 3)   # 1 early, ramps to 3
+	var palette: Array = [
+		{"name": "TERRA", "color": Color(0.45, 0.70, 1.0)},
+		{"name": "VULCAN", "color": Color(1.0, 0.55, 0.35)},
+		{"name": "CERES", "color": Color(0.70, 0.85, 0.55)},
+	]
+	var made: int = 0
+	var attempt: int = 0
+	while made < count and attempt < 40:
+		attempt += 1
+		# Deterministic candidate from wave + slot + attempt (no randf at load).
+		var seed_i: int = wave * 131 + made * 53 + attempt * 17
+		var fxs: float = float((seed_i * 2654435761) % 1000) / 1000.0
+		var fys: float = float((seed_i * 40503) % 1000) / 1000.0
+		var px: float = GRAV_SPAWN_MARGIN + fxs * (arena.x - 2.0 * GRAV_SPAWN_MARGIN)
+		var py: float = GRAV_SPAWN_MARGIN + fys * (arena.y - 2.0 * GRAV_SPAWN_MARGIN)
+		var cand: Vector2 = Vector2(px, py)
+		if cand.distance_to(center) < GRAV_PLAYER_CLEAR:
+			continue
+		var too_close: bool = false
+		for w in gravity_wells:
+			if cand.distance_to(w.pos) < 120.0:
+				too_close = true
+				break
+		if too_close:
+			continue
+		# MS-PS2-4: a clear mass SPREAD (light / medium / heavy) by slot so the
+		# learner can compare how mass changes curvature. Top end capped at 6800
+		# (not higher) so the heaviest planet still curves-not-snaps a shot at
+		# this 600x920 scale with GRAV_G=1.0 / GRAV_MIN_R2=900.
+		var mass_table: Array = [3200.0, 5200.0, 6800.0]
+		var mass_val: float = float(mass_table[made % mass_table.size()])
+		# Radius tracks mass so heavier reads bigger; capped at 40 so the
+		# GRAV_ABSORB capture radius (well.radius * 0.62) stays fair.
+		var radius_val: float = clamp(18.0 + mass_val / 360.0, 20.0, 40.0)
+		var pal: Dictionary = palette[made % palette.size()]
+		gravity_wells.append({
+			"pos": cand,
+			"mass": mass_val,
+			"radius": radius_val,
+			"color": pal.color,
+			"name": pal.name,
+		})
+		made += 1
+
+
+func _gravity_accel(p: Vector2) -> Vector2:
+	# Sum of inverse-square accelerations toward every well:
+	#   a += dir.normalized() * GRAV_G * mass / max(r2, GRAV_MIN_R2)
+	var a: Vector2 = Vector2.ZERO
+	for w in gravity_wells:
+		var dir: Vector2 = w.pos - p
+		var r2: float = dir.length_squared()
+		if r2 < 0.0001:
+			continue
+		a += dir.normalized() * (GRAV_G * float(w.mass) / max(r2, GRAV_MIN_R2))
+	return a
+
+
+func _predict_trajectory(start: Vector2, vel: Vector2) -> PackedVector2Array:
+	# Forward-integrate the SAME gravity model the bullets use, returning a
+	# polyline the learner can read before firing. Stops at capture / off-arena.
+	var pts: PackedVector2Array = PackedVector2Array()
+	var p: Vector2 = start
+	var v: Vector2 = vel
+	pts.append(p)
+	for _i in range(TRAJ_STEPS):
+		v += _gravity_accel(p) * TRAJ_DT
+		p += v * TRAJ_DT
+		pts.append(p)
+		var captured: bool = false
+		for w in gravity_wells:
+			if p.distance_to(w.pos) <= float(w.radius) * GRAV_ABSORB:
+				captured = true
+				break
+		if captured:
+			break
+		if p.x < -30.0 or p.x > arena.x + 30.0 or p.y < -30.0 or p.y > arena.y + 30.0:
+			break
+	return pts
+
+
+func _nearest_well_dist(p: Vector2) -> float:
+	# Distance from p to the closest well center (-1.0 if no wells).
+	if gravity_wells.is_empty():
+		return -1.0
+	var best: float = INF
+	for w in gravity_wells:
+		best = min(best, p.distance_to(w.pos))
+	return best
+
+
+# ============================  TELEMETRY  =================================
+func _telemetry_append(ev: Dictionary) -> void:
+	# Buffer one JSON-serializable event; periodically flush to disk.
+	telemetry.append(ev)
+	if telemetry.size() - telemetry_flushed >= TELEMETRY_FLUSH_EVERY:
+		_telemetry_flush()
+
+
+func _telemetry_flush() -> void:
+	# Append all not-yet-written events as JSON lines (one object per line).
+	if telemetry_flushed >= telemetry.size():
+		return
+	var f: FileAccess = FileAccess.open(TELEMETRY_PATH, FileAccess.READ_WRITE)
+	if f == null:
+		f = FileAccess.open(TELEMETRY_PATH, FileAccess.WRITE)
+	if f == null:
+		return
+	f.seek_end()
+	var i: int = telemetry_flushed
+	while i < telemetry.size():
+		f.store_line(JSON.stringify(telemetry[i]))
+		i += 1
+	f.close()
+	telemetry_flushed = telemetry.size()
+
+
+func _telemetry_session_start() -> void:
+	# One header line per run so analysts can segment by session.
+	_telemetry_append({
+		"event": "session_start",
+		"mode": "physics" if physics_mode else "arcade",
+		"class": class_label,
+		"difficulty": String(_diff().name),
+		"t": run_time,
+	})
+
+
+func _log_shot(nose: Vector2, ang: float, speed: float) -> void:
+	# Record one player shot's launch vector + gravity context (physics only).
+	if not physics_mode:
+		return
+	tel_shots += 1
+	var mp: Vector2 = get_global_mouse_position()
+	var nd: float = _nearest_well_dist(nose)
+	# A shot "uses gravity" if its predicted path passes near a well.
+	var used: bool = false
+	var pred: PackedVector2Array = _predict_trajectory(nose, Vector2.RIGHT.rotated(ang) * speed)
+	for w in gravity_wells:
+		for pt in pred:
+			if pt.distance_to(w.pos) <= float(w.radius) * GRAV_ASSIST_NEAR:
+				used = true
+				break
+		if used:
+			break
+	_telemetry_append({
+		"event": "shot",
+		"t": run_time,
+		"wave": wave,
+		"shot_angle": ang,
+		"shot_speed": speed,
+		"ship_pos": [nose.x, nose.y],
+		"aim_target": [mp.x, mp.y],
+		"num_wells": gravity_wells.size(),
+		"nearest_well_dist": nd,
+		"used_gravity": used,
+	})
+
+
+func _log_hit(b: Dictionary, target_pos: Vector2, enemy_type: String, killed: bool) -> void:
+	# Perpendicular distance from the struck target to the bullet's ORIGINAL aim
+	# ray (launch point p0 along unit dir0). ~0 == straight shot; large == the
+	# shot had to curve around a planet to connect (gravity-assisted hit proxy).
+	if not physics_mode:
+		return
+	var p0: Vector2 = b.get("p0", b.pos)
+	var dir0: Vector2 = b.get("dir0", Vector2.RIGHT)
+	var rel: Vector2 = target_pos - p0
+	var off: float = abs(rel.cross(dir0))   # dir0 is unit length => |perp component|
+	var assisted: bool = bool(b.get("assisted", false))
+	if assisted:
+		tel_assist_hits += 1
+	_telemetry_append({
+		"event": "hit",
+		"t": run_time,
+		"wave": wave,
+		"dist_from_straight_line": off,
+		"enemy_type": enemy_type,
+		"used_gravity": assisted,
+		"killed": killed,
+	})
+
+
 # ============================  SPAWNING / WAVES  ==========================
 func _handle_spawning(delta: float) -> void:
 	spawn_timer -= delta
@@ -1244,6 +1573,10 @@ func _handle_spawning(delta: float) -> void:
 		spawn_interval = max(SPAWN_MIN, spawn_interval * SPAWN_RAMP)
 		# Difficulty scales the wait between spawns (lower = faster spawns).
 		spawn_timer = spawn_interval * float(_diff().spawn_mult)
+		# Physics Lab: stretch the interval so the arena stays uncluttered and
+		# the focus is on aiming through gravity rather than crowd control.
+		if physics_mode:
+			spawn_timer *= 1.8
 
 
 func _spawn_pos() -> Vector2:
@@ -1304,6 +1637,9 @@ func _next_wave() -> void:
 	spawn_interval = max(SPAWN_MIN, spawn_interval * 0.85)
 	banner_t = 1.6
 	banner_text = "WAVE %d" % wave
+	# Physics Lab: reseat the gravitational bodies for the new wave.
+	if physics_mode:
+		_spawn_wells_for_wave()
 	sfx.play("wave")
 	if wave >= 10:
 		_unlock_ach("wave10")
@@ -1534,6 +1870,21 @@ func _update_bullets(delta: float) -> void:
 				vel = Vector2.RIGHT.rotated(new_ang) * HOMING_SPEED
 				b.vel = vel
 			fx.burst(b.pos, Color(1.0, 0.6, 0.3, 0.8), 1, 40.0)
+		elif physics_mode and not gravity_wells.is_empty():
+			# GRAVITY: integrate the inverse-square field. Homing missiles steer
+			# themselves, so only non-homing player bullets obey gravity here.
+			vel += _gravity_accel(b.pos) * delta
+			b.vel = vel
+			# Flag the shot gravity-assisted once it passes near a well; mark
+			# bullets that fall into a well for absorption (the filter below
+			# drops anything with life <= 0, so set life negative to capture it).
+			for w in gravity_wells:
+				var d: float = b.pos.distance_to(w.pos)
+				if not bool(b.get("assisted", false)) and d <= float(w.radius) * GRAV_ASSIST_NEAR:
+					b.assisted = true
+				if d <= float(w.radius) * GRAV_ABSORB:
+					b.life = -1.0
+					fx.burst(b.pos, w.color, 6, 90.0)
 		b.pos += vel * delta
 		b.life -= delta
 	bullets = bullets.filter(func(b):
@@ -1560,6 +1911,13 @@ func _update_enemies(delta: float) -> void:
 		var to_player: Vector2 = player_pos - epos
 		if to_player.length() > 0.01:
 			var espd: float = _enemy_speed(type) * float(_diff().enemy_speed_mult)
+			# Physics Lab: enemies advance more slowly and nearly hold position
+			# once close, so the player can line up banked / slingshot shots
+			# through the gravity field instead of dodging a swarm.
+			if physics_mode:
+				espd *= 0.45
+				if epos.distance_to(player_pos) < 260.0:
+					espd *= 0.25
 			epos += to_player.normalized() * espd * delta
 		e.pos = epos
 		e.spin = float(e.spin) + delta * (1.0 if type == "boss" else 2.0)
@@ -1835,11 +2193,17 @@ func _resolve_collisions() -> void:
 			var type: String = e.type
 			var er: float = _e_radius(e)
 			if bp.distance_to(e.pos) <= er + BULLET_RADIUS:
+				var ehit_pos: Vector2 = e.pos
 				_deal_damage(e, bdmg)
 				if type == "boss":
 					_add_trauma(0.06)
-				if int(e.hp) <= 0:
+				var killed: bool = int(e.hp) <= 0
+				if killed:
 					_on_enemy_killed(type, e.pos, bool(e.get("elite", false)))
+				# Telemetry: log gravity-assisted hits so analysts can see when a
+				# curved shot landed (Physics Lab only; gated inside _log_hit).
+				if physics_mode:
+					_log_hit(b, ehit_pos, type, killed)
 				# Consume the bullet unless it can still pierce.
 				if bpierce > 0:
 					bpierce -= 1
@@ -2058,6 +2422,12 @@ func _draw() -> void:
 	draw_set_transform(shake_offset, 0.0, ONE)
 	_draw_background()
 	_draw_stars()
+	# Physics Lab: gravity-field arrows sit UNDER wells/actors (MS-PS2-5).
+	if physics_mode:
+		_draw_gravity_field()
+	# Physics Lab: gravitational bodies sit behind the actors.
+	if physics_mode:
+		_draw_wells()
 	for pk in pickups:
 		_draw_pickup(pk)
 	for e in enemies:
@@ -2068,6 +2438,9 @@ func _draw() -> void:
 		_draw_bullet(b)
 	if laser_firing and not game_over:
 		_draw_laser()
+	# Physics Lab: predicted-trajectory overlay above the world, below the ship.
+	if physics_mode and opt_trajectory and not game_over:
+		_draw_trajectory()
 	if not game_over:
 		_draw_player()
 	# --- HUD/UI (no shake) ---
@@ -2263,6 +2636,88 @@ func _draw_bullet(b: Dictionary) -> void:
 	draw_circle(p, BULLET_RADIUS, Color(1.0, 0.97, 0.7))
 
 
+# MS-PS2-5: coarse gravity-field vector visualization (toggle with F in physics mode).
+# Reads the canonical _gravity_accel() field; magnitude is sqrt-compressed so
+# near-planet cells do not dominate. Drawn faint, under wells/bullets/enemies.
+func _draw_gravity_field() -> void:
+	if not physics_mode or not opt_field or gravity_wells.is_empty():
+		return
+	var step: float = 48.0
+	var K: float = 50.0
+	var KA: float = 4.5
+	var col_base: Color = Color(0.4, 0.8, 1.0, 1.0)
+	var gy: float = step * 0.5
+	while gy < arena.y:
+		var gx: float = step * 0.5
+		while gx < arena.x:
+			var c: Vector2 = Vector2(gx, gy)
+			var a: Vector2 = _gravity_accel(c)
+			var mag: float = a.length()
+			if mag > 0.0008:
+				var arrow_len: float = clamp(sqrt(mag) * K, 4.0, 26.0)
+				var al: float = clamp(mag * KA, 0.12, 0.5)
+				var dir: Vector2 = a.normalized()
+				var tip: Vector2 = c + dir * arrow_len
+				var ac: Color = Color(col_base.r, col_base.g, col_base.b, al)
+				draw_line(c, tip, ac, 1.0)
+				var perp: Vector2 = Vector2(-dir.y, dir.x)
+				var head: float = clamp(arrow_len * 0.35, 3.0, 7.0)
+				draw_line(tip, tip - dir * head + perp * (head * 0.5), ac, 1.0)
+				draw_line(tip, tip - dir * head - perp * (head * 0.5), ac, 1.0)
+			gx += step
+		gy += step
+	pass
+
+
+func _draw_wells() -> void:
+	# Each gravitational body: a faint field halo + a couple of orbit rings + a
+	# solid planet disc + a label. The halo hints at the inverse-square reach so
+	# the learner can read where curvature will be strongest.
+	for w in gravity_wells:
+		var c: Color = w.color
+		var rad: float = float(w.radius)
+		var center: Vector2 = w.pos
+		# Soft field halo (nested fading rings).
+		for hi in range(3):
+			var hr: float = rad * (2.2 + 1.4 * float(hi))
+			draw_arc(center, hr, 0.0, TAU, 40, Color(c.r, c.g, c.b, 0.10 - 0.025 * float(hi)), 1.5)
+		# Faint orbit rings.
+		draw_arc(center, rad * 1.7, 0.0, TAU, 48, Color(c.r, c.g, c.b, 0.22), 1.0)
+		draw_arc(center, rad * 2.6, 0.0, TAU, 48, Color(c.r, c.g, c.b, 0.14), 1.0)
+		# Planet body + bright core glow.
+		draw_circle(center, rad * 1.25, Color(c.r, c.g, c.b, 0.16))
+		draw_circle(center, rad, c.darkened(0.15))
+		draw_circle(center, rad * 0.55, c.lightened(0.25))
+		draw_arc(center, rad, 0.0, TAU, 40, c.lightened(0.4), 2.0)
+		# Name label below the planet.
+		_text_center(center.x, center.y + rad + 16.0, String(w.name), 11, Color(c.r, c.g, c.b, 0.85))
+		# MS-PS2-4: mass label (in thousands) so masses are directly comparable.
+		var lc: Color = Color(min(c.r + 0.35, 1.0), min(c.g + 0.35, 1.0), min(c.b + 0.35, 1.0), 0.95)
+		var m_txt: String = "M=%.1fk" % (float(w.mass) / 1000.0)
+		_text_center(center.x, center.y + rad + 29.0, m_txt, 12, lc)
+
+
+func _draw_trajectory() -> void:
+	# Preview the path a bullet WOULD take from the ship nose with the current
+	# aim and bullet speed, integrating the same gravity model. Drawn as a fading
+	# dotted polyline so the learner sees the curve before committing the shot.
+	var nose: Vector2 = player_pos + Vector2.RIGHT.rotated(player_rot) * (PLAYER_RADIUS + 6.0)
+	var v0: Vector2 = Vector2.RIGHT.rotated(player_rot) * BULLET_SPEED
+	var pts: PackedVector2Array = _predict_trajectory(nose, v0)
+	var n: int = pts.size()
+	if n < 2:
+		return
+	for k in range(n - 1):
+		# Dotted: draw every other segment.
+		if k % 2 == 1:
+			continue
+		var ft: float = 1.0 - float(k) / float(n)   # fade along the path
+		var col: Color = Color(0.6, 0.9, 1.0, 0.10 + 0.45 * ft)
+		draw_line(pts[k], pts[k + 1], col, 2.0)
+	# A small marker at the predicted endpoint.
+	draw_circle(pts[n - 1], 3.0, Color(0.7, 0.95, 1.0, 0.5))
+
+
 func _draw_laser() -> void:
 	# Bright core line + outer glow + a muzzle spark. Drawn only while firing.
 	var dir: Vector2 = Vector2.RIGHT.rotated(player_rot)
@@ -2386,6 +2841,22 @@ func _draw_bar(pos: Vector2, size: Vector2, frac: float, color: Color, label: St
 
 func _draw_hud() -> void:
 	var right_x: float = arena.x - HUD_MARGIN
+
+	# --- Physics Lab tag + learning hint + live telemetry feedback (left). ---
+	if physics_mode:
+		_text_glow(HUD_MARGIN + 56.0, 96.0, "PHYSICS LAB", 14,
+			Color(0.6, 0.95, 1.0), Color(0.2, 0.6, 0.9, 0.5))
+		_draw_text_left(HUD_MARGIN, 114.0,
+			"Curve shots around planets - gravity is mass / distance squared",
+			11, Color(0.55, 0.8, 1.0))
+		_draw_text_left(HUD_MARGIN, 130.0,
+			"shots: %d  ·  gravity-assist hits: %d" % [tel_shots, tel_assist_hits],
+			11, Color(0.7, 0.9, 1.0))
+		var ttag: String = "ON" if opt_trajectory else "OFF"
+		var ftag: String = "ON" if opt_field else "OFF"
+		_draw_text_left(HUD_MARGIN, 146.0,
+			"[T] trajectory: %s   [F] field: %s" % [ttag, ftag], 11,
+			Color(0.55, 0.7, 0.95))
 
 	# --- Top-right column: SCORE, then a single consolidated status line,
 	#     then WAVE. All right-aligned so nothing clips the right edge. ---
@@ -2681,6 +3152,19 @@ func _draw_class_select() -> void:
 		dr.position.y + dr.size.y * 0.5 + 6.0, "◄ ►", 14,
 		dcol.lerp(Color.WHITE, 0.4))
 
+	# --- MODE toggle row (ARCADE / PHYSICS LAB), interactive (click or [G]). ---
+	var mcol: Color = Color(0.55, 0.95, 1.0) if physics_mode else Color(0.7, 0.78, 0.92)
+	var mhot: bool = mode_row_rect.has_point(get_global_mouse_position())
+	_panel(mode_row_rect, mcol, physics_mode or mhot)
+	var mlabel: String = "MODE:  PHYSICS LAB" if physics_mode else "MODE:  ARCADE"
+	_text_center(mode_row_rect.position.x + mode_row_rect.size.x * 0.5,
+		mode_row_rect.position.y + mode_row_rect.size.y * 0.5 + 5.0, mlabel, 15, mcol)
+	if physics_mode:
+		_draw_text_left(mode_row_rect.position.x + 12.0,
+			mode_row_rect.position.y + mode_row_rect.size.y + 15.0,
+			"Gravity wells bend your shots — aim with physics.  [G] to switch",
+			11, Color(0.55, 0.8, 1.0))
+
 	# --- Footer strip: BEST (highlighted class) + achievements + hints. ---
 	var foot_h: float = 56.0
 	var foot: Rect2 = Rect2(Vector2(24.0, arena.y - foot_h - 16.0),
@@ -2698,7 +3182,7 @@ func _draw_class_select() -> void:
 		13, hl_col.lerp(Color.WHITE, 0.3))
 	# Row 2: control hints (left) + lifetime meta currency (right).
 	_draw_text_left(fcx, foot.position.y + 44.0,
-		"1 / 2 / 3 or click  ·  ◄ ► difficulty  ·  M mute",
+		"1 / 2 / 3 or click  ·  ◄ ► difficulty  ·  G mode  ·  M mute",
 		12, TH_TEXT_DIM)
 	_draw_text_right(foot.position.x + foot.size.x - fpad, foot.position.y + 44.0,
 		"CREDITS  %d" % total_credits, 12, TH_ACCENT2)
