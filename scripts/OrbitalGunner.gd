@@ -69,6 +69,7 @@ var proj_alive: bool = false
 var trail: PackedVector2Array = PackedVector2Array()
 var fx: Array = []                   # expanding rings: {pos, t, color}
 var flash_t: float = 0.0
+var anim: float = 0.0                 # global animation accumulator (for pulsing/blink)
 var result_msg: String = ""
 var last_miss_dist: float = 0.0
 
@@ -93,23 +94,26 @@ const STAGES: Array = [
 		"cannon": Vector2(80, 780),
 		"targets": [{"pos": Vector2(500, 220), "radius": 26.0}],
 		"par": 1,
-		"hint": "Projectile motion: angle sets direction, power sets speed. No gravity here, aim straight."
+		"mission": "M1 · ORBITAL DELIVERY",
+		"hint": "Launch from Earth straight to the supply depot. No gravity bodies yet: angle picks heading, power picks burn. Aim true."
 	},
 	{
 		"type": "gunner",
-		"wells": [{"pos": Vector2(300, 470), "mass": 2200.0, "radius": 42.0, "name": "Terra"}],
+		"wells": [{"pos": Vector2(300, 470), "mass": 2200.0, "radius": 42.0, "name": "Luna"}],
 		"cannon": Vector2(80, 780),
 		"targets": [{"pos": Vector2(520, 470), "radius": 24.0}],
 		"par": 2,
-		"hint": "A planet bends your shot. Gravity pulls more when you fly close; let it curve the path."
+		"mission": "M2 · LUNAR FLYBY",
+		"hint": "The Moon's gravity bends your probe. The closer you pass, the harder Luna pulls; let it curve you to the depot."
 	},
 	{
 		"type": "gunner",
-		"wells": [{"pos": Vector2(320, 430), "mass": 4200.0, "radius": 52.0, "name": "Vesta"}],
+		"wells": [{"pos": Vector2(320, 430), "mass": 4200.0, "radius": 52.0, "name": "Mars"}],
 		"cannon": Vector2(80, 800),
 		"targets": [{"pos": Vector2(230, 150), "radius": 24.0}],
 		"par": 3,
-		"hint": "Slingshot! Skim the far side of the planet so its gravity whips you around to the target."
+		"mission": "M3 · MARS SLINGSHOT",
+		"hint": "Gravity assist: skim the far side of Mars so its pull whips the probe around toward the station, just like real NASA flybys."
 	},
 	{
 		"type": "gates",
@@ -121,11 +125,12 @@ const STAGES: Array = [
 			{"pos": Vector2(510, 210), "radius": 30.0}
 		],
 		"par": 1,
-		"hint": "Thread the gates: one shot must pass through every ring. Match the trajectory to the arc."
+		"mission": "M4 · DEEP-SPACE CORRIDOR",
+		"hint": "Thread one transfer path through every nav-beacon. A single launch must pass through all three rings in the corridor."
 	},
 	{
 		"type": "gates",
-		"wells": [{"pos": Vector2(330, 470), "mass": 3000.0, "radius": 44.0, "name": "Mira"}],
+		"wells": [{"pos": Vector2(330, 470), "mass": 3000.0, "radius": 44.0, "name": "Jupiter"}],
 		"cannon": Vector2(70, 810),
 		"gates": [
 			{"pos": Vector2(210, 600), "radius": 32.0},
@@ -133,7 +138,8 @@ const STAGES: Array = [
 			{"pos": Vector2(470, 520), "radius": 30.0}
 		],
 		"par": 1,
-		"hint": "Curved threading: use the planet's pull to bend a single shot through all three gates."
+		"mission": "M5 · JUPITER NAV-LANE",
+		"hint": "Use Jupiter's pull to curve a single transfer arc through all three nav-beacons of the lane."
 	},
 	{
 		"type": "gunner",
@@ -144,7 +150,8 @@ const STAGES: Array = [
 		"cannon": Vector2(70, 800),
 		"targets": [{"pos": Vector2(520, 200), "radius": 24.0}],
 		"par": 3,
-		"hint": "Two wells make a gravity corridor. Balance their pulls to steer between them to the target."
+		"mission": "M6 · BINARY-STAR TRANSIT",
+		"hint": "Two stars form a gravity corridor. Balance the pull of Castor and Pollux to steer between them to the colony."
 	}
 ]
 
@@ -284,6 +291,7 @@ func _aim_velocity() -> Vector2:
 # Process / live integration
 # ============================================================
 func _process(delta: float) -> void:
+	anim += delta
 	# decay fx + flash always
 	if flash_t > 0.0:
 		flash_t = max(0.0, flash_t - delta * 3.0)
@@ -617,9 +625,37 @@ func _text_center(cx: float, y: float, text: String, size: int, color: Color) ->
 	var w: float = _text_width(text, size)
 	draw_string(_font, Vector2(cx - w * 0.5, y), text, HORIZONTAL_ALIGNMENT_LEFT, -1, size, color)
 
+# Tactical-readout frame: dark translucent fill, 1px accent border,
+# a thin accent bar along the top edge, and L-shaped corner brackets.
 func _panel(rect: Rect2) -> void:
 	draw_rect(rect, COL_PANEL, true)
-	draw_rect(rect, Color(COL_ACCENT.r, COL_ACCENT.g, COL_ACCENT.b, 0.35), false, 2.0)
+	draw_rect(rect, Color(COL_ACCENT.r, COL_ACCENT.g, COL_ACCENT.b, 0.30), false, 1.0)
+	# thin accent bar along the top edge
+	var bar: Rect2 = Rect2(rect.position.x, rect.position.y, rect.size.x, 3.0)
+	draw_rect(bar, Color(COL_ACCENT.r, COL_ACCENT.g, COL_ACCENT.b, 0.55), true)
+	# L-shaped corner brackets
+	_corner_brackets(rect, 12.0, COL_ACCENT)
+
+# Short L-shaped ticks at each corner of a rect (HUD console look).
+func _corner_brackets(rect: Rect2, len: float, color: Color) -> void:
+	var c: Color = Color(color.r, color.g, color.b, 0.9)
+	var x0: float = rect.position.x
+	var y0: float = rect.position.y
+	var x1: float = rect.position.x + rect.size.x
+	var y1: float = rect.position.y + rect.size.y
+	var th: float = 2.0
+	# top-left
+	draw_line(Vector2(x0, y0), Vector2(x0 + len, y0), c, th)
+	draw_line(Vector2(x0, y0), Vector2(x0, y0 + len), c, th)
+	# top-right
+	draw_line(Vector2(x1, y0), Vector2(x1 - len, y0), c, th)
+	draw_line(Vector2(x1, y0), Vector2(x1, y0 + len), c, th)
+	# bottom-left
+	draw_line(Vector2(x0, y1), Vector2(x0 + len, y1), c, th)
+	draw_line(Vector2(x0, y1), Vector2(x0, y1 - len), c, th)
+	# bottom-right
+	draw_line(Vector2(x1, y1), Vector2(x1 - len, y1), c, th)
+	draw_line(Vector2(x1, y1), Vector2(x1, y1 - len), c, th)
 
 func _glow(pos: Vector2, r: float, color: Color, layers: int) -> void:
 	for i in range(layers):
@@ -628,6 +664,112 @@ func _glow(pos: Vector2, r: float, color: Color, layers: int) -> void:
 		var rr: float = r * (1.0 + float(i) * 0.55)
 		draw_circle(pos, rr, Color(color.r, color.g, color.b, a))
 	draw_circle(pos, r, color)
+
+# ------------------------------------------------------------
+# Procedural celestial bodies (asset-free)
+# ------------------------------------------------------------
+# Base palette per destination body, switched on its name.
+func _planet_palette(nm: String) -> Color:
+	var n: String = nm.to_lower()
+	if n == "luna":
+		return Color(0.62, 0.64, 0.70)
+	elif n == "mars":
+		return Color(0.72, 0.32, 0.20)
+	elif n == "jupiter":
+		return Color(0.78, 0.64, 0.46)
+	elif n == "castor" or n == "pollux":
+		return Color(1.0, 0.92, 0.62)
+	else:
+		return Color(0.30, 0.42, 0.66)
+
+# Earth at the launch point: atmosphere glow, ocean, day-side,
+# landmasses, crisp rim, and a pulsing launch marker on the rim.
+func _draw_earth(p: Vector2) -> void:
+	var r: float = 16.0
+	# atmosphere glow
+	for i in range(4):
+		var f: float = 1.0 - float(i) / 4.0
+		var rr: float = r + 4.0 + float(i) * 5.0
+		draw_circle(p, rr, Color(0.35, 0.70, 1.0, 0.05 + 0.06 * f))
+	# ocean body
+	draw_circle(p, r, Color(0.10, 0.32, 0.62))
+	# lighter day-side (offset toward upper-right)
+	draw_circle(p + Vector2(-r * 0.30, -r * 0.30), r * 0.78, Color(0.18, 0.45, 0.78))
+	# green landmass blobs
+	draw_circle(p + Vector2(-r * 0.25, -r * 0.20), r * 0.34, Color(0.22, 0.55, 0.30))
+	draw_circle(p + Vector2(r * 0.35, r * 0.10), r * 0.28, Color(0.26, 0.58, 0.32))
+	draw_circle(p + Vector2(r * 0.05, r * 0.42), r * 0.20, Color(0.20, 0.50, 0.28))
+	# crisp rim
+	draw_arc(p, r, 0, TAU, 40, Color(0.55, 0.82, 1.0, 0.85), 1.5)
+	# pulsing launch marker on the rim, pointing along aim_angle
+	var dir: Vector2 = Vector2(cos(aim_angle), sin(aim_angle))
+	var mp: Vector2 = p + dir * r
+	var pulse: float = 0.55 + 0.45 * sin(anim * 5.0)
+	draw_circle(mp, 3.0 + 2.0 * pulse, Color(COL_ACCENT2.r, COL_ACCENT2.g, COL_ACCENT2.b, 0.5 + 0.5 * pulse))
+	draw_line(mp, mp + dir * 8.0, COL_ACCENT2, 2.0)
+	# tiny EARTH label under the planet
+	_text_center(p.x, p.y + r + 16.0, "EARTH", 11, COL_DIM)
+
+# A destination body (well), richer per name.
+func _draw_planet(wp: Vector2, rad: float, nm: String) -> void:
+	var base: Color = _planet_palette(nm)
+	var n: String = nm.to_lower()
+	_glow(wp, rad, Color(base.r * 0.7, base.g * 0.7, base.b * 0.9), 4)
+	if n == "castor" or n == "pollux":
+		# bright glowing star
+		draw_circle(wp, rad, base)
+		draw_circle(wp, rad * 0.62, Color(1.0, 1.0, 0.86))
+		var fl: float = 0.6 + 0.4 * sin(anim * 4.0)
+		draw_arc(wp, rad + 4.0, 0, TAU, 40, Color(1.0, 0.86, 0.45, 0.35 + 0.30 * fl), 2.0)
+		return
+	# rocky/gas planet body
+	draw_circle(wp, rad, base)
+	# day-side highlight
+	draw_circle(wp + Vector2(-rad * 0.28, -rad * 0.28), rad * 0.74, Color(base.r * 1.18, base.g * 1.18, base.b * 1.18))
+	if n == "luna":
+		# grey craters
+		draw_circle(wp + Vector2(-rad * 0.25, rad * 0.10), rad * 0.20, Color(0.48, 0.50, 0.55))
+		draw_circle(wp + Vector2(rad * 0.30, -rad * 0.20), rad * 0.13, Color(0.50, 0.52, 0.57))
+		draw_circle(wp + Vector2(rad * 0.10, rad * 0.38), rad * 0.10, Color(0.46, 0.48, 0.53))
+	elif n == "mars":
+		# polar cap dot
+		draw_circle(wp + Vector2(rad * 0.05, -rad * 0.62), rad * 0.20, Color(0.92, 0.94, 0.98, 0.9))
+		# a dusty marking
+		draw_circle(wp + Vector2(-rad * 0.20, rad * 0.20), rad * 0.18, Color(0.55, 0.24, 0.16))
+	elif n == "jupiter":
+		# horizontal tint bands
+		var bands: Array = [-0.45, -0.15, 0.18, 0.46]
+		for by in bands:
+			var yy: float = wp.y + float(by) * rad
+			var half: float = sqrt(max(rad * rad - pow(float(by) * rad, 2.0), 0.0))
+			var bc: Color = Color(base.r * 0.82, base.g * 0.74, base.b * 0.66, 0.8)
+			draw_line(Vector2(wp.x - half, yy), Vector2(wp.x + half, yy), bc, 4.0)
+		# great red spot
+		draw_circle(wp + Vector2(rad * 0.28, rad * 0.18), rad * 0.16, Color(0.78, 0.34, 0.26))
+	# crisp rim
+	draw_arc(wp, rad, 0, TAU, 40, Color(base.r * 1.3, base.g * 1.3, base.b * 1.3, 0.7), 1.5)
+	draw_arc(wp, rad + 6.0, 0, TAU, 40, Color(COL_ACCENT.r, COL_ACCENT.g, COL_ACCENT.b, 0.25), 1.0)
+	# name + mass label is drawn by the caller (_draw_arena)
+
+# Target rendered as a space-station / docking-ring icon.
+func _draw_station(tp: Vector2, trad: float, pulse: float) -> void:
+	_glow(tp, 4.0 + 2.0 * pulse, COL_ACCENT2, 3)
+	# outer docking ring
+	draw_arc(tp, trad * (0.92 + 0.08 * pulse), 0, TAU, 32, COL_ACCENT2, 2.0)
+	# inner ring
+	draw_arc(tp, trad * 0.55, 0, TAU, 24, Color(COL_ACCENT2.r, COL_ACCENT2.g, COL_ACCENT2.b, 0.7), 1.5)
+	# cross ticks at 4 compass points
+	for k in range(4):
+		var ang: float = float(k) * PI * 0.5
+		var d: Vector2 = Vector2(cos(ang), sin(ang))
+		draw_line(tp + d * (trad * 0.55), tp + d * trad, Color(COL_ACCENT2.r, COL_ACCENT2.g, COL_ACCENT2.b, 0.8), 1.5)
+	# core
+	draw_circle(tp, 4.0, COL_DANGER)
+
+# Small check mark for a passed gate.
+func _draw_check(c: Vector2, s: float, col: Color) -> void:
+	draw_line(c + Vector2(-s * 0.5, 0.0), c + Vector2(-s * 0.1, s * 0.45), col, 3.0)
+	draw_line(c + Vector2(-s * 0.1, s * 0.45), c + Vector2(s * 0.6, -s * 0.5), col, 3.0)
 
 # ============================================================
 # Draw
@@ -659,69 +801,70 @@ func _draw_starfield() -> void:
 
 func _draw_title() -> void:
 	_text_center(W * 0.5, 220, "ORBITAL GUNNER", 46, COL_ACCENT)
-	_text_center(W * 0.5, 262, "Bend your shot through gravity, match the trajectory", 16, COL_DIM)
+	_text_center(W * 0.5, 262, "Launch from Earth - slingshot through gravity to your target", 16, COL_DIM)
 	var box: Rect2 = Rect2(70, 360, 460, 230)
 	_panel(box)
-	_text_center(W * 0.5, 400, "TAP / SPACE to start", 24, COL_ACCENT2)
-	_text_left(Vector2(100, 446), "Controls:", 16, COL_TEXT)
-	_text_left(Vector2(100, 474), "Drag from cannon = aim (dir=angle, length=power)", 14, COL_DIM)
-	_text_left(Vector2(100, 498), "Arrows = adjust angle/power   Space = fire", 14, COL_DIM)
-	_text_left(Vector2(100, 522), "R = retry   N = next (on win)   Esc = back", 14, COL_DIM)
-	_text_left(Vector2(100, 546), "GUNNER: clear targets   GATES: thread every ring", 14, COL_DIM)
+	# blinking console-style launch prompt
+	var blink: float = 0.55 + 0.45 * sin(anim * 4.0)
+	_text_center(W * 0.5, 402, ">> TAP / SPACE TO LAUNCH <<", 22, Color(COL_ACCENT2.r, COL_ACCENT2.g, COL_ACCENT2.b, blink))
+	_text_left(Vector2(100, 446), "FLIGHT DECK:", 16, COL_TEXT)
+	_text_left(Vector2(100, 474), "Drag from Earth = launch vector (dir=heading, length=burn)", 14, COL_DIM)
+	_text_left(Vector2(100, 498), "Arrows = trim heading/burn   Space = launch", 14, COL_DIM)
+	_text_left(Vector2(100, 522), "R = re-launch   N = next mission   Esc = abort", 14, COL_DIM)
+	_text_left(Vector2(100, 546), "DELIVERY: reach the station   CORRIDOR: thread every beacon", 14, COL_DIM)
 	var total: int = 0
 	for s in stage_stars:
 		total += int(s)
-	_text_center(W * 0.5, 650, "Stars earned: " + str(total) + " / " + str(STAGES.size() * 3), 16, COL_ACCENT2)
-	_text_center(W * 0.5, 706, "An educational physics episode", 13, COL_DIM)
+	_text_center(W * 0.5, 650, "Mission stars: " + str(total) + " / " + str(STAGES.size() * 3), 16, COL_ACCENT2)
+	_text_center(W * 0.5, 706, "An educational orbital-mechanics episode", 13, COL_DIM)
 
 func _draw_arena() -> void:
 	# faint arena border
 	draw_rect(Rect2(8, 80, W - 16, H - 96), Color(COL_ACCENT.r, COL_ACCENT.g, COL_ACCENT.b, 0.10), false, 1.0)
-	# wells
+	# wells (destination bodies)
 	for w in wells:
 		var wd: Dictionary = w
 		var wp: Vector2 = wd["pos"]
 		var rad: float = float(wd["radius"])
-		_glow(wp, rad, Color(0.35, 0.45, 0.7), 4)
-		draw_circle(wp, rad, Color(0.20, 0.28, 0.45))
-		draw_arc(wp, rad + 6.0, 0, TAU, 40, Color(COL_ACCENT.r, COL_ACCENT.g, COL_ACCENT.b, 0.30), 1.5)
+		var nm: String = String(wd.get("name", "?"))
+		_draw_planet(wp, rad, nm)
 		var mk: float = float(wd["mass"]) / 1000.0
-		var label: String = String(wd["name"]) + "  M=" + str(snappedf(mk, 0.1)) + "k"
+		var label: String = nm + "  M=" + str(snappedf(mk, 0.1)) + "k"
 		_text_center(wp.x, wp.y + rad + 20.0, label, 13, COL_DIM)
-	# targets (pulsing)
+	# targets = docking-ring stations (pulsing)
 	if stage_type == "gunner":
-		var pulse: float = 0.5 + 0.5 * sin(float(Time.get_ticks_msec()) * 0.005)
+		var pulse: float = 0.5 + 0.5 * sin(anim * 3.0)
 		for t in targets:
 			var td: Dictionary = t
 			if bool(td["dead"]):
 				continue
 			var tp: Vector2 = td["pos"]
 			var trad: float = float(td["radius"])
-			_glow(tp, trad * (0.85 + 0.15 * pulse), COL_ACCENT2, 3)
-			draw_arc(tp, trad + 4.0, 0, TAU, 32, COL_ACCENT2, 2.0)
-			draw_circle(tp, 4.0, COL_DANGER)
-	# gates (rings)
+			_draw_station(tp, trad, pulse)
+	# gates (nav-beacon rings)
 	if stage_type == "gates":
+		var gp_pulse: float = 0.5 + 0.5 * sin(anim * 3.5)
 		for g in gates:
 			var gd: Dictionary = g
 			var gp: Vector2 = gd["pos"]
 			var grad: float = float(gd["radius"])
 			if bool(gd["passed"]):
-				draw_circle(gp, grad, Color(COL_GOOD.r, COL_GOOD.g, COL_GOOD.b, 0.20))
+				# locked / green: filled + check
+				draw_circle(gp, grad, Color(COL_GOOD.r, COL_GOOD.g, COL_GOOD.b, 0.22))
 				draw_arc(gp, grad, 0, TAU, 40, COL_GOOD, 3.0)
-				_text_center(gp.x, gp.y + 5.0, "PASS", 13, COL_GOOD)
+				_draw_check(gp, grad * 0.5, COL_GOOD)
 			else:
-				draw_arc(gp, grad, 0, TAU, 40, COL_ACCENT, 2.5)
-				draw_arc(gp, grad - 6.0, 0, TAU, 40, Color(COL_ACCENT.r, COL_ACCENT.g, COL_ACCENT.b, 0.4), 1.0)
-	# cannon
-	_glow(cannon, 10.0, COL_ACCENT, 3)
-	draw_circle(cannon, 14.0, Color(0.15, 0.22, 0.35))
-	draw_arc(cannon, 14.0, 0, TAU, 24, COL_ACCENT, 2.0)
-	# live projectile + trail
+				# pending: bright ring
+				var br: float = 0.7 + 0.3 * gp_pulse
+				draw_arc(gp, grad, 0, TAU, 40, Color(COL_ACCENT.r, COL_ACCENT.g, COL_ACCENT.b, br), 2.5)
+				draw_arc(gp, grad - 6.0, 0, TAU, 40, Color(COL_ACCENT.r, COL_ACCENT.g, COL_ACCENT.b, 0.35), 1.0)
+	# launch point = Earth
+	_draw_earth(cannon)
+	# live projectile (rocket/probe) + trail
 	if proj_alive or ep_state == ST_FLYING:
 		_draw_trail()
 		if proj_alive:
-			_glow(proj_pos, PROJ_RADIUS, COL_ACCENT2, 4)
+			_draw_rocket(proj_pos, proj_vel)
 	# fx rings
 	for r in fx:
 		var rd: Dictionary = r
@@ -740,6 +883,36 @@ func _draw_trail() -> void:
 		var a: float = float(i) / float(max(n - 1, 1))
 		var col: Color = Color(COL_ACCENT2.r, COL_ACCENT2.g, COL_ACCENT2.b, 0.15 + 0.55 * a)
 		draw_line(trail[i], trail[i + 1], col, 2.0 + 1.5 * a)
+
+# A small triangular craft oriented along its velocity, with a flame tail.
+func _draw_rocket(p: Vector2, vel: Vector2) -> void:
+	var dir: Vector2 = vel
+	if dir.length() < 0.001:
+		dir = Vector2(cos(aim_angle), sin(aim_angle))
+	dir = dir.normalized()
+	var perp: Vector2 = Vector2(-dir.y, dir.x)
+	var L: float = PROJ_RADIUS + 4.0
+	var Wd: float = PROJ_RADIUS * 0.7
+	# soft glow halo
+	_glow(p, PROJ_RADIUS * 0.7, Color(COL_ACCENT2.r, COL_ACCENT2.g, COL_ACCENT2.b, 1.0), 3)
+	# flame tail (flickers with anim)
+	var flick: float = 0.7 + 0.3 * sin(anim * 22.0)
+	var tail: Vector2 = p - dir * (L * (0.9 + 0.5 * flick))
+	var fl: PackedVector2Array = PackedVector2Array([
+		p - dir * (L * 0.5) + perp * Wd,
+		p - dir * (L * 0.5) - perp * Wd,
+		tail
+	])
+	draw_colored_polygon(fl, Color(1.0, 0.55, 0.2, 0.85))
+	# craft body (triangle nose along dir)
+	var nose: Vector2 = p + dir * L
+	var body: PackedVector2Array = PackedVector2Array([
+		nose,
+		p - dir * (L * 0.4) + perp * Wd,
+		p - dir * (L * 0.4) - perp * Wd
+	])
+	draw_colored_polygon(body, COL_TEXT)
+	draw_polyline(PackedVector2Array([nose, p - dir * (L * 0.4) + perp * Wd, p - dir * (L * 0.4) - perp * Wd, nose]), COL_ACCENT, 1.5)
 
 func _draw_aim() -> void:
 	# aim direction line
@@ -778,12 +951,10 @@ func _draw_hud() -> void:
 	var s: Dictionary = STAGES[stage_index]
 	var panel: Rect2 = Rect2(8, 8, W - 16, 64)
 	_panel(panel)
-	var tlabel: String = "GUNNER"
-	if stage_type == "gates":
-		tlabel = "THREAD THE GATES"
-	_text_left(Vector2(20, 32), "Stage " + str(stage_index + 1) + "/" + str(STAGES.size()) + "  -  " + tlabel, 18, COL_ACCENT)
+	var mlabel: String = String(s.get("mission", "MISSION %d" % (stage_index + 1)))
+	_text_left(Vector2(20, 34), mlabel, 18, COL_ACCENT)
 	var pv: int = int(s["par"])
-	_text_left(Vector2(20, 56), "Shots: " + str(shots_used) + "   Par: " + str(pv) + "   (Esc/BACK = main game)", 13, COL_DIM)
+	_text_left(Vector2(20, 56), "Launches: " + str(shots_used) + "   Par: " + str(pv) + "   (Esc/ABORT = main game)", 13, COL_DIM)
 	# learning hint panel
 	var hp: Rect2 = Rect2(8, H - 56, W - 16, 48)
 	_panel(hp)
@@ -795,20 +966,21 @@ func _draw_hud() -> void:
 func _draw_result() -> void:
 	var box: Rect2 = Rect2(80, 300, 440, 260)
 	_panel(box)
+	var blink: float = 0.5 + 0.5 * sin(anim * 4.0)
 	if won:
-		_text_center(W * 0.5, 350, "STAGE CLEAR!", 34, COL_GOOD)
+		_text_center(W * 0.5, 350, "[ MISSION COMPLETE ]", 30, COL_GOOD)
 		_draw_stars(W * 0.5, 392, last_stars)
-		_text_center(W * 0.5, 446, "Shots used: " + str(shots_used) + "   Par: " + str(int(STAGES[stage_index]["par"])), 15, COL_DIM)
+		_text_center(W * 0.5, 446, "Launches: " + str(shots_used) + "   Par: " + str(int(STAGES[stage_index]["par"])), 15, COL_DIM)
 		if stage_index + 1 < STAGES.size():
-			_text_center(W * 0.5, 496, "N / SPACE = next stage", 16, COL_ACCENT2)
+			_text_center(W * 0.5, 498, ">> N / SPACE : NEXT MISSION <<", 16, Color(COL_ACCENT2.r, COL_ACCENT2.g, COL_ACCENT2.b, blink))
 		else:
-			_text_center(W * 0.5, 496, "All stages done! N = title", 16, COL_ACCENT2)
-		_text_center(W * 0.5, 524, "R = retry   Esc = back to game", 13, COL_DIM)
+			_text_center(W * 0.5, 498, ">> ALL MISSIONS CLEAR - N : TITLE <<", 15, Color(COL_ACCENT2.r, COL_ACCENT2.g, COL_ACCENT2.b, blink))
+		_text_center(W * 0.5, 524, "R = re-launch   Esc = abort to game", 13, COL_DIM)
 	else:
-		_text_center(W * 0.5, 360, "MISS", 34, COL_DANGER)
+		_text_center(W * 0.5, 360, "[ TRANSIT FAILED ]", 30, COL_DANGER)
 		_text_center(W * 0.5, 410, "Closest approach: " + str(int(last_miss_dist)) + " px", 15, COL_DIM)
-		_text_center(W * 0.5, 470, "R = retry stage", 16, COL_ACCENT2)
-		_text_center(W * 0.5, 500, "Esc = back to game", 13, COL_DIM)
+		_text_center(W * 0.5, 470, ">> R : RE-LAUNCH <<", 16, Color(COL_ACCENT2.r, COL_ACCENT2.g, COL_ACCENT2.b, blink))
+		_text_center(W * 0.5, 500, "Esc = abort to game", 13, COL_DIM)
 
 func _draw_stars(cx: float, y: float, n: int) -> void:
 	var spacing: float = 44.0
@@ -831,7 +1003,7 @@ func _draw_star(c: Vector2, r: float, col: Color) -> void:
 	draw_colored_polygon(pts, col)
 
 func _draw_back_box() -> void:
+	# HUD chip: bracketed label + corner ticks, no filled pill.
 	var r: Rect2 = Rect2(W - 96, 14, 82, 34)
-	draw_rect(r, Color(0.12, 0.15, 0.22, 0.9), true)
-	draw_rect(r, Color(COL_DANGER.r, COL_DANGER.g, COL_DANGER.b, 0.6), false, 1.5)
-	_text_center(r.position.x + r.size.x * 0.5, r.position.y + 23, "BACK", 14, COL_DANGER)
+	_corner_brackets(r, 8.0, COL_DANGER)
+	_text_center(r.position.x + r.size.x * 0.5, r.position.y + 23, "◄ ABORT", 13, COL_DANGER)
