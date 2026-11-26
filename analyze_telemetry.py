@@ -111,7 +111,8 @@ def load_events(path):
 def fnum(d, key, default=0.0):
     """Coerce a possibly-missing field to float, robust to bad types."""
     try:
-        return float(d.get(key, default))
+        value = float(d.get(key, default))
+        return value if math.isfinite(value) else default
     except (TypeError, ValueError):
         return default
 
